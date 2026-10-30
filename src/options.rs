@@ -20,6 +20,52 @@ use {
     std::io,
 };
 
+/// The default type to use for untyped numeric values without an explicit suffix.
+///
+/// This affects how numeric literals are parsed when their type is not known in
+/// advance, e.g. when deserialising a [`value::Value`].
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum DefaultNumericType {
+    /// Use the smallest numeric type that can represent the value.
+    #[default]
+    Smallest,
+    /// Use the given types when the value fits, otherwise fall back to
+    /// [`DefaultNumericType::Smallest`].
+    Minimum {
+        /// Default integer type for values without a type suffix.
+        integer: UntypedIntegerType,
+        /// Default floating point type for values without a type suffix.
+        float: UntypedFloatType,
+    },
+}
+
+/// An integer type that can be used as the default for untyped numeric values.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum UntypedIntegerType {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    #[cfg(feature = "integer128")]
+    I128,
+    #[cfg(feature = "integer128")]
+    U128,
+}
+
+/// A floating point type that can be used as the default for untyped numeric values.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum UntypedFloatType {
+    F32,
+    F64,
+}
+
 /// Roundtrip serde options.
 ///
 /// # Examples
@@ -53,6 +99,10 @@ pub struct Options {
     ///  errors can crash the serialization or deserialization process.
     /// Defaults to `Some(128)`, i.e. 128 recursive calls are allowed.
     pub recursion_limit: Option<usize>,
+    /// Default type for untyped numeric values without an explicit suffix.
+    ///
+    /// Defaults to [`DefaultNumericType::Smallest`].
+    pub default_numeric_type: DefaultNumericType,
 }
 
 impl Default for Options {
@@ -60,6 +110,7 @@ impl Default for Options {
         Self {
             default_extensions: Extensions::empty(),
             recursion_limit: Some(128),
+            default_numeric_type: DefaultNumericType::default(),
         }
     }
 }
@@ -93,6 +144,13 @@ impl Options {
     /// `ron` with [`serde_stacker`](https://docs.rs/serde_stacker/latest/serde_stacker/).
     pub fn without_recursion_limit(mut self) -> Self {
         self.recursion_limit = None;
+        self
+    }
+
+    #[must_use]
+    /// Set the default type for untyped numeric values without an explicit suffix.
+    pub fn with_default_numeric_type(mut self, default_numeric_type: DefaultNumericType) -> Self {
+        self.default_numeric_type = default_numeric_type;
         self
     }
 }

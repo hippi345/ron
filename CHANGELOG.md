@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### API Changes
+
+- Added `Options::default_numeric_type` to control the default type used for untyped numeric values without an explicit suffix ([#520](https://github.com/ron-rs/ron/issues/520))
+
 ### Bug Fixes
 
 - Fixed `()` and unit structs failing to deserialise with `ExpectedUnit` when written with whitespace or comments between the parentheses, e.g. `( )` or `(/* none */)`, and `deserialize_any` (e.g. `Value` or untagged enums) reading them as an empty tuple instead of a unit ([#650](https://github.com/ron-rs/ron/pull/650))

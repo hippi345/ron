@@ -15,6 +15,7 @@ use unicode_ident::{is_xid_continue, is_xid_start};
 use crate::{
     error::{Error, Position, Result, Span, SpannedError, SpannedResult},
     extensions::Extensions,
+    options::{DefaultNumericType, UntypedFloatType, UntypedIntegerType},
     value::Number,
 };
 
@@ -66,6 +67,8 @@ pub(crate) type LargeSInt = i64;
 pub struct Parser<'a> {
     /// Bits set according to the [`Extensions`] enum.
     pub exts: Extensions,
+    /// Default type for untyped numeric values without an explicit suffix.
+    pub(crate) default_numeric_type: DefaultNumericType,
     /// Set if the document starts with global attributes, like
     /// `#![type = ".."]`, that do not affect parsing.
     pub(crate) global_attributes: bool,
@@ -106,6 +109,7 @@ impl<'a> Parser<'a> {
     pub fn new(src: &'a str) -> SpannedResult<Self> {
         let mut parser = Parser {
             exts: Extensions::empty(),
+            default_numeric_type: DefaultNumericType::default(),
             global_attributes: false,
             src,
             cursor: ParserCursor {
@@ -521,15 +525,38 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn any_number(&mut self) -> Result<Number> {
-        if self.consume_ident("inf") || self.consume_ident("inff32") {
-            return Ok(Number::F32(crate::value::F32(core::f32::INFINITY)));
-        } else if self.consume_ident("inff64") {
-            return Ok(Number::F64(crate::value::F64(core::f64::INFINITY)));
-        } else if self.consume_ident("NaN") || self.consume_ident("NaNf32") {
-            return Ok(Number::F32(crate::value::F32(core::f32::NAN)));
+    pub(crate) fn untyped_special_float(&mut self) -> Option<Result<Number>> {
+        let default_float = match self.default_numeric_type {
+            DefaultNumericType::Smallest => UntypedFloatType::F32,
+            DefaultNumericType::Minimum { float, .. } => float,
+        };
+
+        if self.consume_ident("inff64") {
+            Some(Ok(Number::F64(crate::value::F64(f64::INFINITY))))
         } else if self.consume_ident("NaNf64") {
-            return Ok(Number::F64(crate::value::F64(core::f64::NAN)));
+            Some(Ok(Number::F64(crate::value::F64(f64::NAN))))
+        } else if self.consume_ident("inff32") {
+            Some(Ok(Number::F32(crate::value::F32(core::f32::INFINITY))))
+        } else if self.consume_ident("NaNf32") {
+            Some(Ok(Number::F32(crate::value::F32(core::f32::NAN))))
+        } else if self.consume_ident("inf") {
+            Some(match default_float {
+                UntypedFloatType::F32 => Ok(Number::F32(crate::value::F32(core::f32::INFINITY))),
+                UntypedFloatType::F64 => Ok(Number::F64(crate::value::F64(f64::INFINITY))),
+            })
+        } else if self.consume_ident("NaN") {
+            Some(match default_float {
+                UntypedFloatType::F32 => Ok(Number::F32(crate::value::F32(core::f32::NAN))),
+                UntypedFloatType::F64 => Ok(Number::F64(crate::value::F64(f64::NAN))),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn any_number(&mut self) -> Result<Number> {
+        if let Some(number) = self.untyped_special_float() {
+            return Ok(number?);
         }
 
         if self.next_bytes_is_float() {
@@ -893,7 +920,7 @@ impl<'a> Parser<'a> {
             ("-NaN", -f32::NAN, -f64::NAN),
         ] {
             if self.consume_ident(literal) {
-                return T::parse(literal);
+                return T::parse(literal, self.default_numeric_type);
             }
 
             if let Some(suffix) = self.src().strip_prefix(literal) {
@@ -975,7 +1002,7 @@ impl<'a> Parser<'a> {
             self.set_cursor(backup_cursor);
         }
 
-        let value = T::parse(&f)?;
+        let value = T::parse(&f, self.default_numeric_type)?;
 
         self.advance_bytes(num_bytes);
 
@@ -1655,46 +1682,22 @@ impl Integer for ParsedInteger {
         if sign < 0 {
             let signed = parser.parse_integer::<LargeSInt>(-1, base)?;
 
-            return if let Ok(x) = i8::try_from(signed) {
-                Ok(ParsedInteger::I8(x))
-            } else if let Ok(x) = i16::try_from(signed) {
-                Ok(ParsedInteger::I16(x))
-            } else if let Ok(x) = i32::try_from(signed) {
-                Ok(ParsedInteger::I32(x))
-            } else {
-                #[cfg(not(feature = "integer128"))]
-                {
-                    Ok(ParsedInteger::I64(signed))
+            return Ok(match parser.default_numeric_type {
+                DefaultNumericType::Smallest => smallest_signed(signed),
+                DefaultNumericType::Minimum { integer, .. } => {
+                    preferred_signed(integer, signed).unwrap_or_else(|| smallest_signed(signed))
                 }
-                #[cfg(feature = "integer128")]
-                if let Ok(x) = i64::try_from(signed) {
-                    Ok(ParsedInteger::I64(x))
-                } else {
-                    Ok(ParsedInteger::I128(signed))
-                }
-            };
+            });
         }
 
         let unsigned = parser.parse_integer::<LargeUInt>(1, base)?;
 
-        if let Ok(x) = u8::try_from(unsigned) {
-            Ok(ParsedInteger::U8(x))
-        } else if let Ok(x) = u16::try_from(unsigned) {
-            Ok(ParsedInteger::U16(x))
-        } else if let Ok(x) = u32::try_from(unsigned) {
-            Ok(ParsedInteger::U32(x))
-        } else {
-            #[cfg(not(feature = "integer128"))]
-            {
-                Ok(ParsedInteger::U64(unsigned))
+        Ok(match parser.default_numeric_type {
+            DefaultNumericType::Smallest => smallest_unsigned(unsigned),
+            DefaultNumericType::Minimum { integer, .. } => {
+                preferred_unsigned(integer, unsigned).unwrap_or_else(|| smallest_unsigned(unsigned))
             }
-            #[cfg(feature = "integer128")]
-            if let Ok(x) = u64::try_from(unsigned) {
-                Ok(ParsedInteger::U64(x))
-            } else {
-                Ok(ParsedInteger::U128(unsigned))
-            }
-        }
+        })
     }
 
     fn try_from_parsed_integer(parsed: ParsedInteger, _ron: &str) -> Result<Self> {
@@ -1702,8 +1705,84 @@ impl Integer for ParsedInteger {
     }
 }
 
+fn smallest_signed(signed: LargeSInt) -> ParsedInteger {
+    if let Ok(x) = i8::try_from(signed) {
+        ParsedInteger::I8(x)
+    } else if let Ok(x) = i16::try_from(signed) {
+        ParsedInteger::I16(x)
+    } else if let Ok(x) = i32::try_from(signed) {
+        ParsedInteger::I32(x)
+    } else {
+        #[cfg(not(feature = "integer128"))]
+        {
+            ParsedInteger::I64(signed)
+        }
+        #[cfg(feature = "integer128")]
+        if let Ok(x) = i64::try_from(signed) {
+            ParsedInteger::I64(x)
+        } else {
+            ParsedInteger::I128(signed)
+        }
+    }
+}
+
+fn smallest_unsigned(unsigned: LargeUInt) -> ParsedInteger {
+    if let Ok(x) = u8::try_from(unsigned) {
+        ParsedInteger::U8(x)
+    } else if let Ok(x) = u16::try_from(unsigned) {
+        ParsedInteger::U16(x)
+    } else if let Ok(x) = u32::try_from(unsigned) {
+        ParsedInteger::U32(x)
+    } else {
+        #[cfg(not(feature = "integer128"))]
+        {
+            ParsedInteger::U64(unsigned)
+        }
+        #[cfg(feature = "integer128")]
+        if let Ok(x) = u64::try_from(unsigned) {
+            ParsedInteger::U64(x)
+        } else {
+            ParsedInteger::U128(unsigned)
+        }
+    }
+}
+
+fn preferred_signed(integer: UntypedIntegerType, signed: LargeSInt) -> Option<ParsedInteger> {
+    match integer {
+        UntypedIntegerType::I8 => i8::try_from(signed).ok().map(ParsedInteger::I8),
+        UntypedIntegerType::I16 => i16::try_from(signed).ok().map(ParsedInteger::I16),
+        UntypedIntegerType::I32 => i32::try_from(signed).ok().map(ParsedInteger::I32),
+        UntypedIntegerType::I64 => i64::try_from(signed).ok().map(ParsedInteger::I64),
+        UntypedIntegerType::U8
+        | UntypedIntegerType::U16
+        | UntypedIntegerType::U32
+        | UntypedIntegerType::U64 => None,
+        #[cfg(feature = "integer128")]
+        UntypedIntegerType::I128 => i128::try_from(signed).ok().map(ParsedInteger::I128),
+        #[cfg(feature = "integer128")]
+        UntypedIntegerType::U128 => None,
+    }
+}
+
+fn preferred_unsigned(integer: UntypedIntegerType, unsigned: LargeUInt) -> Option<ParsedInteger> {
+    match integer {
+        UntypedIntegerType::U8 => u8::try_from(unsigned).ok().map(ParsedInteger::U8),
+        UntypedIntegerType::U16 => u16::try_from(unsigned).ok().map(ParsedInteger::U16),
+        UntypedIntegerType::U32 => u32::try_from(unsigned).ok().map(ParsedInteger::U32),
+        UntypedIntegerType::U64 => u64::try_from(unsigned).ok().map(ParsedInteger::U64),
+        UntypedIntegerType::I8
+        | UntypedIntegerType::I16
+        | UntypedIntegerType::I32
+        | UntypedIntegerType::I64 => None,
+        #[cfg(feature = "integer128")]
+        UntypedIntegerType::U128 => u128::try_from(unsigned).ok().map(ParsedInteger::U128),
+        #[cfg(feature = "integer128")]
+        UntypedIntegerType::I128 => None,
+    }
+}
+
 pub trait Float: Sized {
-    fn parse(float: &str) -> Result<Self>;
+    fn parse(float: &str, default_numeric_type: DefaultNumericType) -> Result<Self>;
 
     fn try_from_parsed_float(parsed: ParsedFloat, ron: &str) -> Result<Self>;
 }
@@ -1711,7 +1790,7 @@ pub trait Float: Sized {
 macro_rules! impl_float {
     ($wrap:ident($ty:ty: $bits:expr)) => {
         impl Float for $ty {
-            fn parse(float: &str) -> Result<Self> {
+            fn parse(float: &str, _: DefaultNumericType) -> Result<Self> {
                 <$ty>::from_str(float).map_err(|_| Error::ExpectedFloat)
             }
 
@@ -1741,25 +1820,37 @@ pub enum ParsedFloat {
 }
 
 impl Float for ParsedFloat {
-    fn parse(float: &str) -> Result<Self> {
+    fn parse(float: &str, default_numeric_type: DefaultNumericType) -> Result<Self> {
+        let default_float = match default_numeric_type {
+            DefaultNumericType::Smallest => UntypedFloatType::F32,
+            DefaultNumericType::Minimum { float, .. } => float,
+        };
+
         let value = f64::from_str(float).map_err(|_| Error::ExpectedFloat)?;
 
-        // Casting a NaN with `as` gives an unspecified NaN, and some targets
-        // (e.g. riscv64) drop the sign, so build the f32 NaN by hand.
         if value.is_nan() {
             let nan = if value.is_sign_negative() {
                 -f32::NAN
             } else {
                 f32::NAN
             };
-            return Ok(ParsedFloat::F32(nan));
+            return match default_float {
+                UntypedFloatType::F32 => Ok(ParsedFloat::F32(nan)),
+                UntypedFloatType::F64 => Ok(ParsedFloat::F64(value)),
+            };
         }
 
-        #[allow(clippy::cast_possible_truncation)]
-        if value.total_cmp(&f64::from(value as f32)).is_eq() {
-            Ok(ParsedFloat::F32(value as f32))
-        } else {
-            Ok(ParsedFloat::F64(value))
+        match default_float {
+            UntypedFloatType::F64 => Ok(ParsedFloat::F64(value)),
+            UntypedFloatType::F32 =>
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                if value.total_cmp(&f64::from(value as f32)).is_eq() {
+                    Ok(ParsedFloat::F32(value as f32))
+                } else {
+                    Ok(ParsedFloat::F64(value))
+                }
+            }
         }
     }
 

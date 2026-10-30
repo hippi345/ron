@@ -62,6 +62,7 @@ impl<'de> Deserializer<'de> {
         };
 
         deserializer.parser.exts |= options.default_extensions;
+        deserializer.parser.default_numeric_type = options.default_numeric_type;
 
         Ok(deserializer)
     }
@@ -368,17 +369,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             return visitor.visit_none();
         } else if self.parser.consume_unit()? {
             return visitor.visit_unit();
-        } else if self.parser.consume_ident("inf") || self.parser.consume_ident("inff32") {
-            let number = crate::value::Number::F32(crate::value::F32(core::f32::INFINITY));
-            return self.handle_float_range_or_value(number, visitor);
-        } else if self.parser.consume_ident("inff64") {
-            let number = crate::value::Number::F64(crate::value::F64(core::f64::INFINITY));
-            return self.handle_float_range_or_value(number, visitor);
-        } else if self.parser.consume_ident("NaN") || self.parser.consume_ident("NaNf32") {
-            let number = crate::value::Number::F32(crate::value::F32(core::f32::NAN));
-            return self.handle_float_range_or_value(number, visitor);
-        } else if self.parser.consume_ident("NaNf64") {
-            let number = crate::value::Number::F64(crate::value::F64(core::f64::NAN));
+        } else if let Some(number) = self.parser.untyped_special_float() {
+            let number = number?;
             return self.handle_float_range_or_value(number, visitor);
         }
 
